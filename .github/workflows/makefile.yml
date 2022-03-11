@@ -14,12 +14,15 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     
-    - name: script
-      run: |
-        set -e
-        sudo apt update
-        sudo apt install -y g++ make flex bison libssl-dev libelf-dev bc
-        make -j`nproc` KCONFIG_CONFIG=Microsoft/config-wsl
+    - name: apt update
+      run: sudo apt update
+        
+    - name: apt install
+      run: sudo apt install -y g++ make flex bison libssl-dev libelf-dev bc dwarves
+        
+    - name: make
+      run: make -j8 KCONFIG_CONFIG=Microsoft/config-wsl
+    
     - name: Release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
