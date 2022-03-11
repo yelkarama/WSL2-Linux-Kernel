@@ -1,0 +1,27 @@
+name: Makefile CI
+
+on:
+  push:
+    branches: [ linux-msft-wsl-5.10.y ]
+  pull_request:
+    branches: [ linux-msft-wsl-5.10.y ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: script
+      run: |
+        set -e
+        sudo apt update
+        sudo apt install -y g++ make flex bison libssl-dev libelf-dev bc
+        make -j`nproc` KCONFIG_CONFIG=Microsoft/config-wsl
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: arch/x86_64/boot/bzImage
