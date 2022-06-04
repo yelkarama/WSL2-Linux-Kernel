@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
 /*
- * Core routines for interacting with Microsoft's Hyper-V hypervisor.
- * Includes hypervisor initialization, and handling of crashes and
- * kexecs through a set of static "handler" variables set by the
- * architecture independent VMbus driver.
+ * Core routines for interacting with Microsoft's Hyper-V hypervisor,
+ * including hypervisor initialization.
  *
  * Copyright (C) 2021, Microsoft, Inc.
  *
@@ -12,69 +10,32 @@
  */
 
 #include <linux/types.h>
-#include <linux/export.h>
-#include <linux/ptrace.h>
-#include <linux/errno.h>
 #include <linux/acpi.h>
+#include <linux/export.h>
+#include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/cpuhotplug.h>
-#include <linux/slab.h>
-#include <linux/cpumask.h>
 #include <asm/mshyperv.h>
 
-static bool		hyperv_initialized;
-struct ms_hyperv_info	ms_hyperv __ro_after_init;
-EXPORT_SYMBOL_GPL(ms_hyperv);
+static bool hyperv_initialized;
 
-u32	*hv_vp_index;
-EXPORT_SYMBOL_GPL(hv_vp_index);
-
-u32	hv_max_vp_index;
-EXPORT_SYMBOL_GPL(hv_max_vp_index);
-
-void  __percpu **hyperv_pcpu_input_arg;
-EXPORT_SYMBOL_GPL(hyperv_pcpu_input_arg);
-
-static int hv_cpu_init(unsigned int cpu)
-{
-	void **input_arg;
-
-	input_arg = (void **)this_cpu_ptr(hyperv_pcpu_input_arg);
-	*input_arg = kmalloc(HV_HYP_PAGE_SIZE, GFP_KERNEL);
-	if (unlikely(!*input_arg))
-		return -ENOMEM;
-	hv_vp_index[cpu] = hv_get_vpreg(HV_REGISTER_VP_INDEX);
-	return 0;
-}
-
-static int hv_cpu_die(unsigned int cpu)
-{
-	void **input_arg;
-	void *input;
-	unsigned long flags;
-
-	local_irq_save(flags);
-	input_arg = (void **)this_cpu_ptr(hyperv_pcpu_input_arg);
-	input = *input_arg;
-	*input_arg = NULL;
-	local_irq_restore(flags);
-	kfree(input);
-
-	return 0;
-}
-
-void __init hyperv_early_init(void)
+static int __init hyperv_init(void)
 {
 	struct hv_get_vp_registers_output	result;
 	u32	a, b, c, d;
 	u64	guest_id;
+	int	ret;
 
 	/*
-	 * If we're in a VM on Hyper-V, the ACPI hypervisor_id field will
-	 * have the string "MsHyperV".
+	 * Allow for a kernel built with CONFIG_HYPERV to be running in
+	 * a non-Hyper-V environment, including on DT instead of ACPI.
+	 * In such cases, do nothing and return success.
 	 */
+	if (acpi_disabled)
+		return 0;
+
 	if (strncmp((char *)&acpi_gbl_FADT.hypervisor_id, "MsHyperV", 8))
-		return;
+		return 0;
 
 	/* Setup the guest ID */
 	guest_id = generate_guest_id(0, LINUX_VERSION_CODE, 0);
@@ -93,13 +54,6 @@ void __init hyperv_early_init(void)
 		ms_hyperv.features, ms_hyperv.priv_high, ms_hyperv.hints,
 		ms_hyperv.misc_features);
 
-	/*
-	 * If Hyper-V has crash notifications, set crash_kexec_post_notifiers
-	 * so that we will report the panic to Hyper-V before running kdump.
-	 */
-	if (ms_hyperv.misc_features & HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE)
-		crash_kexec_post_notifiers = true;
-
 	/* Get information about the Hyper-V host version */
 	hv_get_vpreg_128(HV_REGISTER_HYPERVISOR_VERSION, &result);
 	a = result.as32.a;
@@ -109,112 +63,25 @@ void __init hyperv_early_init(void)
 	pr_info("Hyper-V: Host Build %d.%d.%d.%d-%d-%d\n",
 		b >> 16, b & 0xFFFF, a,	d & 0xFFFFFF, c, d >> 24);
 
+	ret = hv_common_init();
+	if (ret)
+		return ret;
+
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "arm64/hyperv_init:online",
+				hv_common_cpu_init, hv_common_cpu_die);
+	if (ret < 0) {
+		hv_common_free();
+		return ret;
+	}
+
 	hyperv_initialized = true;
-}
-
-static int __init hyperv_init(void)
-{
-	int	i;
-
-	/*
-	 * Allocate the per-CPU state for the hypercall input arg.
-	 * If this allocation fails, we will not be able to setup
-	 * (per-CPU) hypercall input page and thus this failure is
-	 * fatal on Hyper-V.
-	 */
-	hyperv_pcpu_input_arg = alloc_percpu(void *);
-	if (unlikely(!hyperv_pcpu_input_arg))
-		return -ENOMEM;
-
-	/*
-	 * Return if not running as a Hyper-V guest.
-	 */
-	if (!hyperv_initialized)
-		return 0;
-
-	/* Allocate and initialize percpu VP index array */
-	hv_max_vp_index = num_possible_cpus();
-	hv_vp_index = kmalloc_array(hv_max_vp_index, sizeof(*hv_vp_index),
-				    GFP_KERNEL);
-	if (!hv_vp_index) {
-		hv_max_vp_index = 0;
-		free_percpu(hyperv_pcpu_input_arg);
-		return -ENOMEM;
-	}
-
-	for (i = 0; i < hv_max_vp_index; i++)
-		hv_vp_index[i] = VP_INVAL;
-
-	if (cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "arm64/hyperv_init:online",
-					hv_cpu_init, hv_cpu_die) < 0) {
-		hv_max_vp_index = 0;
-		kfree(hv_vp_index);
-		hv_vp_index = NULL;
-		free_percpu(hyperv_pcpu_input_arg);
-		return -EINVAL;
-	}
-
-	/* Query the VMs extended capability once, so that it can be cached. */
-	hv_query_ext_cap(0);
 	return 0;
 }
 
 early_initcall(hyperv_init);
-
-/* This routine is called before kexec/kdump. It does required cleanup. */
-void hyperv_cleanup(void)
-{
-	hv_set_vpreg(HV_REGISTER_GUEST_OSID, 0);
-
-}
-EXPORT_SYMBOL_GPL(hyperv_cleanup);
 
 bool hv_is_hyperv_initialized(void)
 {
 	return hyperv_initialized;
 }
 EXPORT_SYMBOL_GPL(hv_is_hyperv_initialized);
-
-bool hv_is_hibernation_supported(void)
-{
-	return false;
-}
-EXPORT_SYMBOL_GPL(hv_is_hibernation_supported);
-
-/*
- * The VMbus handler functions are no-ops on ARM64 because
- * VMbus interrupts are handled as percpu IRQs.
- */
-void hv_setup_vmbus_handler(void (*handler)(void))
-{
-}
-EXPORT_SYMBOL_GPL(hv_setup_vmbus_handler);
-
-void hv_remove_vmbus_handler(void)
-{
-}
-EXPORT_SYMBOL_GPL(hv_remove_vmbus_handler);
-
-/*
- * The kexec and crash handler functions are
- * currently no-ops on ARM64.
- */
-void hv_setup_kexec_handler(void (*handler)(void))
-{
-}
-EXPORT_SYMBOL_GPL(hv_setup_kexec_handler);
-
-void hv_remove_kexec_handler(void)
-{
-}
-EXPORT_SYMBOL_GPL(hv_remove_kexec_handler);
-
-void hv_setup_crash_handler(void (*handler)(struct pt_regs *regs))
-{
-}
-EXPORT_SYMBOL_GPL(hv_setup_crash_handler);
-
-void hv_remove_crash_handler(void)
-{
-}
-EXPORT_SYMBOL_GPL(hv_remove_crash_handler);

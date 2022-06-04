@@ -425,7 +425,7 @@ static bool xennet_tx_buf_gc(struct netfront_queue *queue)
 			skb = queue->tx_skbs[id];
 			queue->tx_skbs[id] = NULL;
 			if (unlikely(!gnttab_end_foreign_access_ref(
-				queue->grant_tx_ref[id], GNTMAP_readonly))) {
+				queue->grant_tx_ref[id]))) {
 				dev_alert(dev,
 					  "Grant still in use by backend domain\n");
 				goto err;
@@ -642,8 +642,8 @@ static int xennet_xdp_xmit(struct net_device *dev, int n,
 	struct netfront_info *np = netdev_priv(dev);
 	struct netfront_queue *queue = NULL;
 	unsigned long irq_flags;
-	int drops = 0;
-	int i, err;
+	int nxmit = 0;
+	int i;
 
 	if (unlikely(np->broken))
 		return -ENODEV;
@@ -658,15 +658,13 @@ static int xennet_xdp_xmit(struct net_device *dev, int n,
 
 		if (!xdpf)
 			continue;
-		err = xennet_xdp_xmit_one(dev, queue, xdpf);
-		if (err) {
-			xdp_return_frame_rx_napi(xdpf);
-			drops++;
-		}
+		if (xennet_xdp_xmit_one(dev, queue, xdpf))
+			break;
+		nxmit++;
 	}
 	spin_unlock_irqrestore(&queue->tx_lock, irq_flags);
 
-	return n - drops;
+	return nxmit;
 }
 
 
@@ -938,12 +936,10 @@ static u32 xennet_run_xdp(struct netfront_queue *queue, struct page *pdata,
 	u32 act;
 	int err;
 
-	xdp->data_hard_start = page_address(pdata);
-	xdp->data = xdp->data_hard_start + XDP_PACKET_HEADROOM;
-	xdp_set_data_meta_invalid(xdp);
-	xdp->data_end = xdp->data + len;
-	xdp->rxq = &queue->xdp_rxq;
-	xdp->frame_sz = XEN_PAGE_SIZE - XDP_PACKET_HEADROOM;
+	xdp_init_buff(xdp, XEN_PAGE_SIZE - XDP_PACKET_HEADROOM,
+		      &queue->xdp_rxq);
+	xdp_prepare_buff(xdp, page_address(pdata), XDP_PACKET_HEADROOM,
+			 len, false);
 
 	act = bpf_prog_run_xdp(prog, xdp);
 	switch (act) {
@@ -951,7 +947,9 @@ static u32 xennet_run_xdp(struct netfront_queue *queue, struct page *pdata,
 		get_page(pdata);
 		xdpf = xdp_convert_buff_to_frame(xdp);
 		err = xennet_xdp_xmit(queue->info->netdev, 1, &xdpf, 0);
-		if (unlikely(err < 0))
+		if (unlikely(!err))
+			xdp_return_frame_rx_napi(xdpf);
+		else if (unlikely(err < 0))
 			trace_xdp_exception(queue->info->netdev, prog, act);
 		break;
 	case XDP_REDIRECT:
@@ -970,7 +968,7 @@ static u32 xennet_run_xdp(struct netfront_queue *queue, struct page *pdata,
 		break;
 
 	default:
-		bpf_warn_invalid_xdp_action(act);
+		bpf_warn_invalid_xdp_action(queue->info->netdev, prog, act);
 	}
 
 	return act;
@@ -1031,7 +1029,7 @@ static int xennet_get_responses(struct netfront_queue *queue,
 			goto next;
 		}
 
-		if (!gnttab_end_foreign_access_ref(ref, 0)) {
+		if (!gnttab_end_foreign_access_ref(ref)) {
 			dev_alert(dev,
 				  "Grant still in use by backend domain\n");
 			queue->info->broken = true;
@@ -1390,7 +1388,6 @@ static void xennet_release_tx_bufs(struct netfront_queue *queue)
 		queue->tx_skbs[i] = NULL;
 		get_page(queue->grant_tx_page[i]);
 		gnttab_end_foreign_access(queue->grant_tx_ref[i],
-					  GNTMAP_readonly,
 					  (unsigned long)page_address(queue->grant_tx_page[i]));
 		queue->grant_tx_page[i] = NULL;
 		queue->grant_tx_ref[i] = GRANT_INVALID_REF;
@@ -1423,7 +1420,7 @@ static void xennet_release_rx_bufs(struct netfront_queue *queue)
 		 * foreign access is ended (which may be deferred).
 		 */
 		get_page(page);
-		gnttab_end_foreign_access(ref, 0,
+		gnttab_end_foreign_access(ref,
 					  (unsigned long)page_address(page));
 		queue->grant_rx_ref[id] = GRANT_INVALID_REF;
 
@@ -1733,7 +1730,7 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 	return ERR_PTR(err);
 }
 
-/**
+/*
  * Entry point to this code when a new device is created.  Allocate the basic
  * structures and the ring buffers for communication with the backend, and
  * inform the backend of the appropriate details for those.
@@ -1765,7 +1762,7 @@ static void xennet_end_access(int ref, void *page)
 {
 	/* This frees the page as a side-effect */
 	if (ref != GRANT_INVALID_REF)
-		gnttab_end_foreign_access(ref, 0, (unsigned long)page);
+		gnttab_end_foreign_access(ref, (unsigned long)page);
 }
 
 static void xennet_disconnect_backend(struct netfront_info *info)
@@ -1810,7 +1807,7 @@ static void xennet_disconnect_backend(struct netfront_info *info)
 	}
 }
 
-/**
+/*
  * We are reconnecting to the backend, due to a suspend/resume, or a backend
  * driver restart.  We tear down our netif structure and recreate it, but
  * leave the device-layer structures intact so that this is transparent to the
@@ -1969,7 +1966,7 @@ static int setup_netfront(struct xenbus_device *dev,
 	 *  a) feature-split-event-channels == 0
 	 *  b) feature-split-event-channels == 1 but failed to setup
 	 */
-	if (!feature_split_evtchn || (feature_split_evtchn && err))
+	if (!feature_split_evtchn || err)
 		err = setup_netfront_single(queue);
 
 	if (err)
@@ -1982,14 +1979,14 @@ static int setup_netfront(struct xenbus_device *dev,
 	 */
  fail:
 	if (queue->rx_ring_ref != GRANT_INVALID_REF) {
-		gnttab_end_foreign_access(queue->rx_ring_ref, 0,
+		gnttab_end_foreign_access(queue->rx_ring_ref,
 					  (unsigned long)rxs);
 		queue->rx_ring_ref = GRANT_INVALID_REF;
 	} else {
 		free_page((unsigned long)rxs);
 	}
 	if (queue->tx_ring_ref != GRANT_INVALID_REF) {
-		gnttab_end_foreign_access(queue->tx_ring_ref, 0,
+		gnttab_end_foreign_access(queue->tx_ring_ref,
 					  (unsigned long)txs);
 		queue->tx_ring_ref = GRANT_INVALID_REF;
 	} else {
@@ -2163,7 +2160,7 @@ static int xennet_create_page_pool(struct netfront_queue *queue)
 	}
 
 	err = xdp_rxq_info_reg(&queue->xdp_rxq, queue->info->netdev,
-			       queue->id);
+			       queue->id, 0);
 	if (err) {
 		netdev_err(queue->info->netdev, "xdp_rxq_info_reg failed\n");
 		goto err_free_pp;
@@ -2245,6 +2242,7 @@ static int talk_to_netback(struct xenbus_device *dev,
 	unsigned int max_queues = 0;
 	struct netfront_queue *queue = NULL;
 	unsigned int num_queues = 1;
+	u8 addr[ETH_ALEN];
 
 	info->netdev->irq = 0;
 
@@ -2258,11 +2256,12 @@ static int talk_to_netback(struct xenbus_device *dev,
 					"feature-split-event-channels", 0);
 
 	/* Read mac addr. */
-	err = xen_net_read_mac(dev, info->netdev->dev_addr);
+	err = xen_net_read_mac(dev, addr);
 	if (err) {
 		xenbus_dev_fatal(dev, err, "parsing %s/mac", dev->nodename);
 		goto out_unlocked;
 	}
+	eth_hw_addr_set(info->netdev, addr);
 
 	info->netback_has_xdp_headroom = xenbus_read_unsigned(info->xbdev->otherend,
 							      "feature-xdp-headroom", 0);
@@ -2461,7 +2460,7 @@ static int xennet_connect(struct net_device *dev)
 	return 0;
 }
 
-/**
+/*
  * Callback received when the backend's state changes.
  */
 static void netback_changed(struct xenbus_device *dev,
@@ -2569,12 +2568,11 @@ static ssize_t store_rxbuf(struct device *dev,
 			   const char *buf, size_t len)
 {
 	char *endp;
-	unsigned long target;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	target = simple_strtoul(buf, &endp, 0);
+	simple_strtoul(buf, &endp, 0);
 	if (endp == buf)
 		return -EBADMSG;
 

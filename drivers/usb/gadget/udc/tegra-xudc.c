@@ -1412,18 +1412,20 @@ __tegra_xudc_ep_dequeue(struct tegra_xudc_ep *ep,
 			struct tegra_xudc_request *req)
 {
 	struct tegra_xudc *xudc = ep->xudc;
-	struct tegra_xudc_request *r;
+	struct tegra_xudc_request *r = NULL, *iter;
 	struct tegra_xudc_trb *deq_trb;
 	bool busy, kick_queue = false;
 	int ret = 0;
 
 	/* Make sure the request is actually queued to this endpoint. */
-	list_for_each_entry(r, &ep->queue, list) {
-		if (r == req)
-			break;
+	list_for_each_entry(iter, &ep->queue, list) {
+		if (iter != req)
+			continue;
+		r = iter;
+		break;
 	}
 
-	if (r != req)
+	if (!r)
 		return -EINVAL;
 
 	/* Request hasn't been queued in the transfer ring yet. */
@@ -1909,7 +1911,7 @@ static void tegra_xudc_ep_free_request(struct usb_ep *usb_ep,
 	kfree(req);
 }
 
-static struct usb_ep_ops tegra_xudc_ep_ops = {
+static const struct usb_ep_ops tegra_xudc_ep_ops = {
 	.enable = tegra_xudc_ep_enable,
 	.disable = tegra_xudc_ep_disable,
 	.alloc_request = tegra_xudc_ep_alloc_request,
@@ -1930,7 +1932,7 @@ static int tegra_xudc_ep0_disable(struct usb_ep *usb_ep)
 	return -EBUSY;
 }
 
-static struct usb_ep_ops tegra_xudc_ep0_ops = {
+static const struct usb_ep_ops tegra_xudc_ep0_ops = {
 	.enable = tegra_xudc_ep0_enable,
 	.disable = tegra_xudc_ep0_disable,
 	.alloc_request = tegra_xudc_ep_alloc_request,
@@ -2170,7 +2172,7 @@ static int tegra_xudc_set_selfpowered(struct usb_gadget *gadget, int is_on)
 	return 0;
 }
 
-static struct usb_gadget_ops tegra_xudc_gadget_ops = {
+static const struct usb_gadget_ops tegra_xudc_gadget_ops = {
 	.get_frame = tegra_xudc_gadget_get_frame,
 	.wakeup = tegra_xudc_gadget_wakeup,
 	.pullup = tegra_xudc_gadget_pullup,
@@ -3508,10 +3510,8 @@ static int tegra_xudc_phy_get(struct tegra_xudc *xudc)
 		xudc->utmi_phy[i] = devm_phy_optional_get(xudc->dev, phy_name);
 		if (IS_ERR(xudc->utmi_phy[i])) {
 			err = PTR_ERR(xudc->utmi_phy[i]);
-			if (err != -EPROBE_DEFER)
-				dev_err(xudc->dev, "failed to get usb2-%d PHY: %d\n",
-					i, err);
-
+			dev_err_probe(xudc->dev, err,
+				      "failed to get usb2-%d PHY\n", i);
 			goto clean_up;
 		} else if (xudc->utmi_phy[i]) {
 			/* Get usb-phy, if utmi phy is available */
@@ -3520,8 +3520,8 @@ static int tegra_xudc_phy_get(struct tegra_xudc *xudc)
 						&xudc->vbus_nb);
 			if (IS_ERR(xudc->usbphy[i])) {
 				err = PTR_ERR(xudc->usbphy[i]);
-				dev_err(xudc->dev, "failed to get usbphy-%d: %d\n",
-					i, err);
+				dev_err_probe(xudc->dev, err,
+					      "failed to get usbphy-%d\n", i);
 				goto clean_up;
 			}
 		} else if (!xudc->utmi_phy[i]) {
@@ -3538,10 +3538,8 @@ static int tegra_xudc_phy_get(struct tegra_xudc *xudc)
 		xudc->usb3_phy[i] = devm_phy_optional_get(xudc->dev, phy_name);
 		if (IS_ERR(xudc->usb3_phy[i])) {
 			err = PTR_ERR(xudc->usb3_phy[i]);
-			if (err != -EPROBE_DEFER)
-				dev_err(xudc->dev, "failed to get usb3-%d PHY: %d\n",
-					usb3, err);
-
+			dev_err_probe(xudc->dev, err,
+				      "failed to get usb3-%d PHY\n", usb3);
 			goto clean_up;
 		} else if (xudc->usb3_phy[i])
 			dev_dbg(xudc->dev, "usb3-%d PHY registered", usb3);
@@ -3781,9 +3779,7 @@ static int tegra_xudc_probe(struct platform_device *pdev)
 
 	err = devm_clk_bulk_get(&pdev->dev, xudc->soc->num_clks, xudc->clks);
 	if (err) {
-		if (err != -EPROBE_DEFER)
-			dev_err(xudc->dev, "failed to request clocks: %d\n", err);
-
+		dev_err_probe(xudc->dev, err, "failed to request clocks\n");
 		return err;
 	}
 
@@ -3798,9 +3794,7 @@ static int tegra_xudc_probe(struct platform_device *pdev)
 	err = devm_regulator_bulk_get(&pdev->dev, xudc->soc->num_supplies,
 				      xudc->supplies);
 	if (err) {
-		if (err != -EPROBE_DEFER)
-			dev_err(xudc->dev, "failed to request regulators: %d\n", err);
-
+		dev_err_probe(xudc->dev, err, "failed to request regulators\n");
 		return err;
 	}
 

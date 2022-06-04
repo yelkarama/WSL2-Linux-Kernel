@@ -567,7 +567,7 @@ static struct snd_soc_dai_driver wm8731_dai = {
 		.rates = WM8731_RATES,
 		.formats = WM8731_FORMATS,},
 	.ops = &wm8731_dai_ops,
-	.symmetric_rates = 1,
+	.symmetric_rate = 1,
 };
 
 static int wm8731_request_supplies(struct device *dev,
@@ -710,18 +710,12 @@ static int wm8731_spi_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int wm8731_spi_remove(struct spi_device *spi)
-{
-	return 0;
-}
-
 static struct spi_driver wm8731_spi_driver = {
 	.driver = {
 		.name	= "wm8731",
 		.of_match_table = wm8731_of_match,
 	},
 	.probe		= wm8731_spi_probe,
-	.remove		= wm8731_spi_remove,
 };
 #endif /* CONFIG_SPI_MASTER */
 
@@ -786,11 +780,6 @@ err_regulator_enable:
 	return ret;
 }
 
-static int wm8731_i2c_remove(struct i2c_client *client)
-{
-	return 0;
-}
-
 static const struct i2c_device_id wm8731_i2c_id[] = {
 	{ "wm8731", 0 },
 	{ }
@@ -803,7 +792,6 @@ static struct i2c_driver wm8731_i2c_driver = {
 		.of_match_table = wm8731_of_match,
 	},
 	.probe =    wm8731_i2c_probe,
-	.remove =   wm8731_i2c_remove,
 	.id_table = wm8731_i2c_id,
 };
 #endif

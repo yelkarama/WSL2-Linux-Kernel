@@ -7,8 +7,6 @@
  */
 
 #include <linux/tcp.h>
-#include <linux/slab.h>
-#include <linux/random.h>
 #include <linux/siphash.h>
 #include <linux/kernel.h>
 #include <linux/export.h>
@@ -16,7 +14,7 @@
 #include <net/tcp.h>
 #include <net/route.h>
 
-static siphash_key_t syncookie_secret[2] __read_mostly;
+static siphash_aligned_key_t syncookie_secret[2];
 
 #define COOKIEBITS 24	/* Upper bits store count */
 #define COOKIEMASK (((__u32)1 << COOKIEBITS) - 1)
@@ -424,7 +422,7 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb)
 			   inet_sk_flowi_flags(sk),
 			   opt->srr ? opt->faddr : ireq->ir_rmt_addr,
 			   ireq->ir_loc_addr, th->source, th->dest, sk->sk_uid);
-	security_req_classify_flow(req, flowi4_to_flowi(&fl4));
+	security_req_classify_flow(req, flowi4_to_flowi_common(&fl4));
 	rt = ip_route_output_key(sock_net(sk), &fl4);
 	if (IS_ERR(rt)) {
 		reqsk_free(req);

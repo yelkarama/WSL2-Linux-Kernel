@@ -40,7 +40,7 @@
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/rawnand.h>
-#include <linux/mtd/nand_ecc.h>
+#include <linux/mtd/nand-ecc-sw-hamming.h>
 #include <linux/mtd/partitions.h>
 
 #include "gpio-cfg.h"
@@ -247,6 +247,7 @@ static int __init jive_mtdset(char *options)
 	case 1:
 		nand->nr_partitions = ARRAY_SIZE(jive_imageB_nand_part);
 		nand->partitions = jive_imageB_nand_part;
+		break;
 	case 0:
 		/* this is already setup in the nand info */
 		break;

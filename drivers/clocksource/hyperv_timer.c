@@ -361,9 +361,6 @@ EXPORT_SYMBOL_GPL(hv_stimer_global_cleanup);
  * Hyper-V and 32-bit x86.  The TSC reference page version is preferred.
  */
 
-u64 (*hv_read_reference_counter)(void);
-EXPORT_SYMBOL_GPL(hv_read_reference_counter);
-
 static union {
 	struct ms_hyperv_tsc_page page;
 	u8 reserved[PAGE_SIZE];
@@ -419,7 +416,7 @@ static void resume_hv_clock_tsc(struct clocksource *arg)
 	hv_set_register(HV_REGISTER_REFERENCE_TSC, tsc_msr);
 }
 
-#ifdef VDSO_CLOCKMODE_HVCLOCK
+#ifdef HAVE_VDSO_CLOCKMODE_HVCLOCK
 static int hv_cs_enable(struct clocksource *cs)
 {
 	vclocks_set_used(VDSO_CLOCKMODE_HVCLOCK);
@@ -435,7 +432,7 @@ static struct clocksource hyperv_cs_tsc = {
 	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
 	.suspend= suspend_hv_clock_tsc,
 	.resume	= resume_hv_clock_tsc,
-#ifdef VDSO_CLOCKMODE_HVCLOCK
+#ifdef HAVE_VDSO_CLOCKMODE_HVCLOCK
 	.enable = hv_cs_enable,
 	.vdso_clock_mode = VDSO_CLOCKMODE_HVCLOCK,
 #else
@@ -490,7 +487,7 @@ static __always_inline void hv_setup_sched_clock(void *sched_clock)
 static __always_inline void hv_setup_sched_clock(void *sched_clock)
 {
 	/* We're on x86/x64 *and* using PV ops */
-	pv_ops.time.sched_clock = sched_clock;
+	paravirt_set_sched_clock(sched_clock);
 }
 #else /* !CONFIG_GENERIC_SCHED_CLOCK && !CONFIG_PARAVIRT */
 static __always_inline void hv_setup_sched_clock(void *sched_clock) {}
@@ -502,6 +499,9 @@ static bool __init hv_init_tsc_clocksource(void)
 	phys_addr_t	phys_addr;
 
 	if (!(ms_hyperv.features & HV_MSR_REFERENCE_TSC_AVAILABLE))
+		return false;
+
+	if (hv_root_partition)
 		return false;
 
 	/*
@@ -547,7 +547,7 @@ void __init hv_init_clocksource(void)
 {
 	/*
 	 * Try to set up the TSC page clocksource. If it succeeds, we're
-	 * done. Otherwise, set up the MSR clocksoruce.  At least one of
+	 * done. Otherwise, set up the MSR clocksource.  At least one of
 	 * these will always be available except on very old versions of
 	 * Hyper-V on x86.  In that case we won't have a Hyper-V
 	 * clocksource, but Linux will still run with a clocksource based
@@ -566,17 +566,3 @@ void __init hv_init_clocksource(void)
 	hv_setup_sched_clock(read_hv_sched_clock_msr);
 }
 EXPORT_SYMBOL_GPL(hv_init_clocksource);
-
-/* Initialize everything on ARM64 */
-static int __init hyperv_timer_init(struct acpi_table_header *table)
-{
-	if (!hv_is_hyperv_initialized())
-		return -EINVAL;
-
-	hv_init_clocksource();
-	if (hv_stimer_alloc(true))
-		return -EINVAL;
-
-	return 0;
-}
-TIMER_ACPI_DECLARE(hyperv, ACPI_SIG_GTDT, hyperv_timer_init);

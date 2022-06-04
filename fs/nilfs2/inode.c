@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * inode.c - NILFS inode operations.
+ * NILFS inode operations.
  *
  * Copyright (C) 2005-2008 Nippon Telegraph and Telephone Corporation.
  *
@@ -203,23 +203,22 @@ static int nilfs_writepage(struct page *page, struct writeback_control *wbc)
 	return 0;
 }
 
-static int nilfs_set_page_dirty(struct page *page)
+static bool nilfs_dirty_folio(struct address_space *mapping,
+		struct folio *folio)
 {
-	struct inode *inode = page->mapping->host;
-	int ret = __set_page_dirty_nobuffers(page);
+	struct inode *inode = mapping->host;
+	struct buffer_head *head;
+	unsigned int nr_dirty = 0;
+	bool ret = filemap_dirty_folio(mapping, folio);
 
-	if (page_has_buffers(page)) {
-		unsigned int nr_dirty = 0;
-		struct buffer_head *bh, *head;
+	/*
+	 * The page may not be locked, eg if called from try_to_unmap_one()
+	 */
+	spin_lock(&mapping->private_lock);
+	head = folio_buffers(folio);
+	if (head) {
+		struct buffer_head *bh = head;
 
-		/*
-		 * This page is locked by callers, and no other thread
-		 * concurrently marks its buffers dirty since they are
-		 * only dirtied through routines in fs/buffer.c in
-		 * which call sites of mark_buffer_dirty are protected
-		 * by page lock.
-		 */
-		bh = head = page_buffers(page);
 		do {
 			/* Do not mark hole blocks dirty */
 			if (buffer_dirty(bh) || !buffer_mapped(bh))
@@ -228,14 +227,13 @@ static int nilfs_set_page_dirty(struct page *page)
 			set_buffer_dirty(bh);
 			nr_dirty++;
 		} while (bh = bh->b_this_page, bh != head);
-
-		if (nr_dirty)
-			nilfs_set_file_dirty(inode, nr_dirty);
 	} else if (ret) {
-		unsigned int nr_dirty = 1 << (PAGE_SHIFT - inode->i_blkbits);
-
-		nilfs_set_file_dirty(inode, nr_dirty);
+		nr_dirty = 1 << (folio_shift(folio) - inode->i_blkbits);
 	}
+	spin_unlock(&mapping->private_lock);
+
+	if (nr_dirty)
+		nilfs_set_file_dirty(inode, nr_dirty);
 	return ret;
 }
 
@@ -303,12 +301,12 @@ const struct address_space_operations nilfs_aops = {
 	.writepage		= nilfs_writepage,
 	.readpage		= nilfs_readpage,
 	.writepages		= nilfs_writepages,
-	.set_page_dirty		= nilfs_set_page_dirty,
+	.dirty_folio		= nilfs_dirty_folio,
 	.readahead		= nilfs_readahead,
 	.write_begin		= nilfs_write_begin,
 	.write_end		= nilfs_write_end,
 	/* .releasepage		= nilfs_releasepage, */
-	.invalidatepage		= block_invalidatepage,
+	.invalidate_folio	= block_invalidate_folio,
 	.direct_IO		= nilfs_direct_IO,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 };
@@ -353,7 +351,7 @@ struct inode *nilfs_new_inode(struct inode *dir, umode_t mode)
 	/* reference count of i_bh inherits from nilfs_mdt_read_block() */
 
 	atomic64_inc(&root->inodes_count);
-	inode_init_owner(inode, dir, mode);
+	inode_init_owner(&init_user_ns, inode, dir, mode);
 	inode->i_ino = ino;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 
@@ -936,14 +934,15 @@ void nilfs_evict_inode(struct inode *inode)
 	 */
 }
 
-int nilfs_setattr(struct dentry *dentry, struct iattr *iattr)
+int nilfs_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+		  struct iattr *iattr)
 {
 	struct nilfs_transaction_info ti;
 	struct inode *inode = d_inode(dentry);
 	struct super_block *sb = inode->i_sb;
 	int err;
 
-	err = setattr_prepare(dentry, iattr);
+	err = setattr_prepare(&init_user_ns, dentry, iattr);
 	if (err)
 		return err;
 
@@ -958,7 +957,7 @@ int nilfs_setattr(struct dentry *dentry, struct iattr *iattr)
 		nilfs_truncate(inode);
 	}
 
-	setattr_copy(inode, iattr);
+	setattr_copy(&init_user_ns, inode, iattr);
 	mark_inode_dirty(inode);
 
 	if (iattr->ia_valid & ATTR_MODE) {
@@ -974,7 +973,8 @@ out_err:
 	return err;
 }
 
-int nilfs_permission(struct inode *inode, int mask)
+int nilfs_permission(struct user_namespace *mnt_userns, struct inode *inode,
+		     int mask)
 {
 	struct nilfs_root *root = NILFS_I(inode)->i_root;
 
@@ -982,7 +982,7 @@ int nilfs_permission(struct inode *inode, int mask)
 	    root->cno != NILFS_CPTREE_CURRENT_CNO)
 		return -EROFS; /* snapshot is not writable */
 
-	return generic_permission(inode, mask);
+	return generic_permission(&init_user_ns, inode, mask);
 }
 
 int nilfs_load_inode_block(struct inode *inode, struct buffer_head **pbh)

@@ -161,7 +161,7 @@ static int zinitix_read_data(struct i2c_client *client,
 
 	ret = i2c_master_recv(client, (u8 *)values, length);
 	if (ret != length)
-		return ret < 0 ? ret : -EIO; ;
+		return ret < 0 ? ret : -EIO;
 
 	return 0;
 }
@@ -252,16 +252,27 @@ static int zinitix_init_touch(struct bt541_ts_data *bt541)
 
 static int zinitix_init_regulators(struct bt541_ts_data *bt541)
 {
-	struct i2c_client *client = bt541->client;
+	struct device *dev = &bt541->client->dev;
 	int error;
 
-	bt541->supplies[0].supply = "vdd";
-	bt541->supplies[1].supply = "vddo";
-	error = devm_regulator_bulk_get(&client->dev,
+	/*
+	 * Some older device trees have erroneous names for the regulators,
+	 * so check if "vddo" is present and in that case use these names.
+	 * Else use the proper supply names on the component.
+	 */
+	if (of_find_property(dev->of_node, "vddo-supply", NULL)) {
+		bt541->supplies[0].supply = "vdd";
+		bt541->supplies[1].supply = "vddo";
+	} else {
+		/* Else use the proper supply names */
+		bt541->supplies[0].supply = "vcca";
+		bt541->supplies[1].supply = "vdd";
+	}
+	error = devm_regulator_bulk_get(dev,
 					ARRAY_SIZE(bt541->supplies),
 					bt541->supplies);
 	if (error < 0) {
-		dev_err(&client->dev, "Failed to get regulators: %d\n", error);
+		dev_err(dev, "Failed to get regulators: %d\n", error);
 		return error;
 	}
 
@@ -516,7 +527,7 @@ static int zinitix_ts_probe(struct i2c_client *client)
 
 	error = devm_request_threaded_irq(&client->dev, client->irq,
 					  NULL, zinitix_ts_irq_handler,
-					  IRQF_ONESHOT,
+					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
 					  client->name, bt541);
 	if (error) {
 		dev_err(&client->dev, "Failed to request IRQ: %d\n", error);
@@ -548,8 +559,6 @@ static int zinitix_ts_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	irq_set_status_flags(client->irq, IRQ_NOAUTOEN);
-
 	return 0;
 }
 
@@ -560,7 +569,7 @@ static int __maybe_unused zinitix_suspend(struct device *dev)
 
 	mutex_lock(&bt541->input_dev->mutex);
 
-	if (bt541->input_dev->users)
+	if (input_device_enabled(bt541->input_dev))
 		zinitix_stop(bt541);
 
 	mutex_unlock(&bt541->input_dev->mutex);
@@ -576,7 +585,7 @@ static int __maybe_unused zinitix_resume(struct device *dev)
 
 	mutex_lock(&bt541->input_dev->mutex);
 
-	if (bt541->input_dev->users)
+	if (input_device_enabled(bt541->input_dev))
 		ret = zinitix_start(bt541);
 
 	mutex_unlock(&bt541->input_dev->mutex);
@@ -588,7 +597,20 @@ static SIMPLE_DEV_PM_OPS(zinitix_pm_ops, zinitix_suspend, zinitix_resume);
 
 #ifdef CONFIG_OF
 static const struct of_device_id zinitix_of_match[] = {
+	{ .compatible = "zinitix,bt402" },
+	{ .compatible = "zinitix,bt403" },
+	{ .compatible = "zinitix,bt404" },
+	{ .compatible = "zinitix,bt412" },
+	{ .compatible = "zinitix,bt413" },
+	{ .compatible = "zinitix,bt431" },
+	{ .compatible = "zinitix,bt432" },
+	{ .compatible = "zinitix,bt531" },
+	{ .compatible = "zinitix,bt532" },
+	{ .compatible = "zinitix,bt538" },
 	{ .compatible = "zinitix,bt541" },
+	{ .compatible = "zinitix,bt548" },
+	{ .compatible = "zinitix,bt554" },
+	{ .compatible = "zinitix,at100" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, zinitix_of_match);
